@@ -127,7 +127,7 @@ class ProcessingEngine:
                 programming_df = self._process_show_programming_standard(grid_data)
             
             # Step 5: Load library sheet FROM MEMORY (passed from Slack upload)
-            self.log("Loading and filtering the library sheet...")
+            self.log("Getting OTTera node IDs...")
             library_df = self._filter_unique_rows_by_latest_date(self.library_file_content)
             if library_df.empty: return
 
@@ -136,7 +136,7 @@ class ProcessingEngine:
 
             if final_df is not None:
                 # Step 7: UPLOAD the final output file to Slack
-                self.log("Success! Uploading the final schedule sheet...")
+                self.log("Success! Creating schedule sheet...")
                 output_filename = f"{self.config['output_prefix']}_Schedule_Sheet_{week_name.upper()}.csv"
                 
                 self.client.files_upload_v2(
@@ -144,7 +144,7 @@ class ProcessingEngine:
                     thread_ts=self.thread_ts,
                     content=final_df.to_csv(index=False),
                     filename=output_filename,
-                    initial_comment=f"Here is your generated schedule for *{self.config['output_prefix']}*."
+                    initial_comment=f"Here it is!"
                 )
             else:
                 self.log(f"--- {self.config['output_prefix']} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---")
@@ -632,7 +632,7 @@ def handle_modal_submission(ack, body, client, view):
 
         initial_msg = client.chat_postMessage(
             channel=dm_channel_id, # Use the new DM channel ID
-            text=f"Got it! Starting schedule generation for *{selected_channel}* on *{selected_date}*. First, let me find your library file..."
+            text=f"Getting *{selected_date}* schedule for *{selected_channel}*..."
         )
         thread_ts = initial_msg["ts"]
 
@@ -646,7 +646,7 @@ def handle_modal_submission(ack, body, client, view):
             
         latest_file = files_response["files"][0]
         file_id = latest_file["id"]
-        client.chat_postMessage(channel=dm_channel_id, thread_ts=thread_ts, text=f"Found file: `{latest_file['name']}`. Now downloading and processing...")
+        client.chat_postMessage(channel=dm_channel_id, thread_ts=thread_ts, text=f"Using library sheet: `{latest_file['name']}`.Processing grid...")
 
         # Download the library CSV content from Slack
         response = requests.get(
