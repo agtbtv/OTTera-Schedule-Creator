@@ -646,7 +646,7 @@ def handle_modal_submission(ack, body, client, view):
             
         latest_file = files_response["files"][0]
         file_id = latest_file["id"]
-        client.chat_postMessage(channel=dm_channel_id, thread_ts=thread_ts, text=f"Using library sheet: `{latest_file['name']}`.Processing grid...")
+        client.chat_postMessage(channel=dm_channel_id, thread_ts=thread_ts, text=f"Using library sheet: `{latest_file['name']}`. Processing grid...")
 
         # Download the library CSV content from Slack
         response = requests.get(
