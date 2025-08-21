@@ -227,7 +227,98 @@ class ProcessingEngine:
         grid_data['Start Time'] = pd.to_datetime(grid_data['Start Time'], errors='coerce').dt.strftime('%H:%M')
         grid_data = grid_data.fillna('')
         return grid_data
+
+    def _run_validations(self, programming_df, library_df):
+        """A dedicated method to run all checks and log the results."""
+        self.log("Running validations...")
+        unfit_durations = self._validate_slot_durations(programming_df, library_df)
+        zero_duration_content = self._check_zero_duration_content(programming_df, library_df)
+
+        # We must call _map_to_ids to populate self.unmatched_ids
+        self.unmatched_ids = []
+        # We can map all unique House Codes at once for efficiency
+        all_house_codes = pd.unique(programming_df[['House Code', 'Bumper In', 'Bumper Out']].values.ravel('K'))
+        all_house_codes_str = '|ad_break|'.join(filter(None, all_house_codes))
+        self._map_to_ids(all_house_codes_str, library_df)
+
+        has_critical_errors = False
+
+        if unfit_durations:
+            self.log("\n--- WARNING: DURATION MISMATCHES FOUND ---")
+            for unfit in unfit_durations:
+                content_duration_formatted = self._convert_seconds_to_hhmm(unfit['Content Duration (seconds)'])
+                slot_duration_formatted = self._convert_seconds_to_hhmm(unfit['Slot Duration (minutes)'] * 60)
+                valid_range_start, valid_range_end = unfit['Valid Range']
+                self.log(
+                    f"{unfit['House Code']} on {unfit['Air Date']} at {unfit['Start Time']}:\n"
+                    f"  > Content duration ({content_duration_formatted}) is outside the valid range for a {slot_duration_formatted} slot.\n"
+                    f"  > The valid duration range for this slot is between {valid_range_start} and {valid_range_end}."
+                )
+
+        if zero_duration_content:
+            has_critical_errors = True
+            self.log("\n--- CRITICAL ERROR: ZERO DURATION CONTENT DETECTED ---")
+            for content in zero_duration_content: self.log(f"{content['House Code']} (ID: {content['Mapped IDs']}) needs reindexing.")
+        
+        if self.unmatched_ids:
+            has_critical_errors = True
+            self.log("\n--- CRITICAL ERROR: UNMATCHED HOUSE CODES (Not in library) ---")
+            self.log(', '.join(sorted(list(set(self.unmatched_ids)))))
+        
+        if self.premature_mpls:
+            self.log("\n--- MANUAL SCHEDULING MAY BE REQUIRED ---")
+            self.log("The following MPLS codes were found. Please verify them in OTTera:")
+            self.log(', '.join(sorted(list(set(self.premature_mpls)))))
+        
+        return has_critical_errors
     
+    def validate_only(self):
+        """
+        Runs the entire process up to the validation step and reports the results
+        without generating a final CSV.
+        """
+        try:
+            # Perform all the same initial steps as the run() method
+            week_name, input_date = self._get_week_name_of_input_date(self.input_date_str)
+            if not week_name: return False
+
+            downloads_folder = str(Path.home() / "Downloads")
+            temp_grid_file = os.path.join(downloads_folder, f"temp_grid_{self.config['output_prefix']}.csv")
+            if not self._download_sheet(self.config['spreadsheet_id'], week_name.upper(), temp_grid_file): return False
+
+            grid_data = self._prepare_grid_data(temp_grid_file, input_date)
+            
+            if self.config.get('processing_logic') == 'pll domestic':
+                programming_df = self._process_show_programming_pll_domestic(grid_data)
+            elif self.config.get('processing_logic') == 'slvr':
+                programming_df = self._process_show_programming_slvr(grid_data)
+            elif self.config.get('processing_logic') == 'slvr_socal':
+                programming_df = self._process_show_programming_slvr_socal(grid_data)
+            else:
+                programming_df = self._process_show_programming_standard(grid_data)
+            
+            library_df = self._filter_unique_rows_by_latest_date(self.library_file_content)
+            if library_df.empty: return False
+
+            # Run the validations and report the outcome
+            has_critical_errors = self._run_validations(programming_df, library_df)
+
+            if has_critical_errors:
+                self.log("\n🚫 Validation Failed.")
+            else:
+                self.log("\n✅ All validations passed successfully!")
+            
+            return not has_critical_errors
+
+        except Exception as e:
+            self.log(f"\n--- A CRITICAL ERROR OCCURRED during validation for {self.config['output_prefix']} ---\n`{e}`")
+            import traceback
+            self.log(f"```\n{traceback.format_exc()}\n```")
+            return False
+        finally:
+            if 'temp_grid_file' in locals() and os.path.exists(temp_grid_file):
+                os.remove(temp_grid_file)
+
     def _process_show_programming_standard(self, grid_data):
         # This function's default is to ALWAYS check for media lists and broken glass,
         #self.log("-> Applying Standard parsing rules.")
@@ -552,6 +643,44 @@ class ProcessingEngine:
         final_columns = ['date', 'linear_channel', 'bumpers_in', 'bumpers_out', 'content', 'randomize_content', 'slot_duration', 'time_slot']
         return output_df[final_columns]
     
+    def _create_final_sheet(self, programming_df, library_df):
+        if programming_df.empty:
+            self.log("WARNING: No programming blocks were found in the grid. Halting process.")
+            return None
+
+        has_critical_errors = self._run_validations(programming_df, library_df)
+        if has_critical_errors:
+            return None # Halt the process if critical errors are found
+              
+        self.log("All critical validations passed. Assembling final sheet...")
+        
+        mapped_ids = programming_df['House Code'].apply(lambda x: self._map_to_ids(x, library_df))
+        mapped_bumpers_in = programming_df['Bumper In'].apply(lambda x: self._map_to_ids(x, library_df))
+        mapped_bumpers_out = programming_df['Bumper Out'].apply(lambda x: self._map_to_ids(x, library_df))
+
+        output_df = pd.DataFrame()
+        output_df['date'] = programming_df['Air Date']
+        output_df['linear_channel'] = self.config['linear_channel_id']
+        output_df['bumpers_in'] = mapped_bumpers_in.apply(lambda x: str(x).split('.')[0])
+        output_df['bumpers_in'] = output_df['bumpers_in'].str.replace('|ad_break', '', regex=False)
+        output_df['bumpers_out'] = mapped_bumpers_out.apply(lambda x: str(x).split('.')[0])
+        output_df['bumpers_out'] = output_df['bumpers_out'].str.replace('|ad_break', '', regex=False)
+        output_df['content'] = mapped_ids.astype(str).apply(lambda x: str(x).split('.')[0])
+        output_df['randomize_content'] = 'FALSE'
+        output_df['slot_duration'] = programming_df['Duration (minutes)']
+        output_df['time_slot'] = programming_df['Start Time']
+        promo_in = self.config.get('hourly_promo_in')
+        promo_out = self.config.get('hourly_promo_out')
+        if promo_in and promo_out:
+            self.log("Applying hourly promos...")
+            output_df['hour'] = output_df['time_slot'].str[:2]
+            output_df['is_new_hour'] = output_df['hour'] != output_df['hour'].shift()
+            output_df.loc[output_df['is_new_hour'], 'content'] = (promo_in + "|" + output_df.loc[output_df['is_new_hour'], 'content'].astype(str) + "|" + promo_out)
+            output_df = output_df.drop(columns=['hour', 'is_new_hour'])
+        output_df['content'] += '|ad_break'
+        final_columns = ['date', 'linear_channel', 'bumpers_in', 'bumpers_out', 'content', 'randomize_content', 'slot_duration', 'time_slot']
+        return output_df[final_columns]
+    
     def _convert_seconds_to_hhmm(self, seconds):
         if pd.isna(seconds): return "00:00"
         total_minutes = int(seconds) // 60
@@ -611,6 +740,27 @@ def handle_generation_command(ack, body, client):
     except Exception as e:
         print(f"Error opening modal: {e}")
 
+@app.command("/validate-schedule")
+def handle_validation_command(ack, body, client):
+    """This function is triggered when a user runs the /validate-schedule command."""
+    ack()
+    
+    try:
+        # Open a modal for user input, similar to the generation command
+        client.views_open(
+            trigger_id=body["trigger_id"],
+            view={
+                "type": "modal",
+                "callback_id": "validate_schedule_modal", # Different callback_id
+                "title": {"type": "plain_text", "text": "Schedule Validator"},
+                "submit": {"type": "plain_text", "text": "Validate"},
+                "close": {"type": "plain_text", "text": "Cancel"},
+                # The blocks are identical to the other modal
+                "blocks": [{"type": "context","elements": [{"type": "mrkdwn","text": "ⓘ *Important*: Please make sure you have uploaded your library CSV file to me *before* running this command."}]},{"type": "input","block_id": "channel_block","label": {"type": "plain_text", "text": "1. Select Channels"},"element": {"type": "checkboxes","action_id": "channel_checkboxes","options": [{"text": {"type": "plain_text", "text": name}, "value": name} for name in CHANNEL_CONFIG.keys()]}},{"type": "actions","elements": [{"type": "button","text": {"type": "plain_text","text": "Select All","emoji": True},"action_id": "select_all_channels_action"}]},{"type": "input","block_id": "date_block","label": {"type": "plain_text", "text": "2. Select Schedule Date"},"element": {"type": "datepicker","action_id": "date_select","initial_date": datetime.now().strftime('%Y-%m-%d'),"placeholder": {"type": "plain_text", "text": "Select a date"}}}]}
+        )
+    except Exception as e:
+        print(f"Error opening validation modal: {e}")
+
 @app.action("select_all_channels_action")
 def handle_select_all_channels(ack, body, client):
     """Handles the 'Select All' button click in the modal."""
@@ -628,7 +778,6 @@ def handle_select_all_channels(ack, body, client):
     except Exception as e:
         print(f"Error updating view: {e}")
 
-# --- REVISION 2: New function to run in a thread. It processes and stores the result. ---
 def process_channel_and_store_result(config, date_str, library_content, client, channel_id, thread_ts, results_list):
     """
     Runs the processing for one channel, posts a single summary message with all logs,
@@ -638,7 +787,6 @@ def process_channel_and_store_result(config, date_str, library_content, client, 
     engine = ProcessingEngine(config, date_str, library_content)
     result_df = engine.run()  # This runs the processing and collects logs internally
 
-    # --- MODIFIED: This section now builds and posts a single summary message ---
     final_status_message = ""
     log_summary = "\n".join(engine.logs) # Combine all collected logs
 
@@ -660,7 +808,100 @@ def process_channel_and_store_result(config, date_str, library_content, client, 
         text=final_status_message
     )
 
-# --- REVISION 3: The modal submission handler is heavily modified to manage threads and combine results. ---
+def validate_channel_and_report(config, date_str, library_content, client, channel_id, thread_ts, success_list):
+    """
+    Runs the validation-only process for one channel and posts the summary log.
+    """
+    engine = ProcessingEngine(config, date_str, library_content)
+    # The validate_only() method runs the checks and collects logs internally
+    was_successful = engine.validate_only() 
+
+    # Combine all collected logs into one message
+    log_summary = "\n".join(engine.logs)
+    
+    # Append the success status to a shared list for a final summary
+    success_list.append(was_successful)
+    
+    client.chat_postMessage(
+        channel=channel_id,
+        thread_ts=thread_ts,
+        text=f"--- Validation Results for *{config['output_prefix']}* ---\n```{log_summary}```"
+    )
+
+@app.view("validate_schedule_modal")
+def handle_validation_modal_submission(ack, body, client, view):
+    """
+    Handles the validation modal, runs the validation process for each channel,
+    and posts a final summary.
+    """
+    user_id = body["user"]["id"]
+    values = view["state"]["values"]
+    selected_options = values["channel_block"]["channel_checkboxes"]["selected_options"]
+    selected_channels = [opt["value"] for opt in selected_options]
+    selected_date = values["date_block"]["date_select"]["selected_date"]
+
+    if not selected_channels:
+        ack(response_action="errors", errors={"channel_block": "Please select at least one channel."})
+        return
+    ack()
+    
+    try:
+        # This logic is very similar to the main submission handler
+        dm_channel_response = client.conversations_open(users=user_id)
+        dm_channel_id = dm_channel_response["channel"]["id"]
+
+        files_response = client.files_list(user=user_id, filetype="csv", count=1)
+        if not files_response["files"]:
+            client.chat_postMessage(channel=dm_channel_id, text="❌ Error: I couldn't find any CSV files you've uploaded. Please upload the library CSV and try again.")
+            return
+        
+        latest_file = files_response["files"][0]
+        response = requests.get(
+            latest_file["url_private_download"],
+            headers={"Authorization": f"Bearer {os.environ['SLACK_BOT_TOKEN']}"}
+        )
+        response.raise_for_status()
+        library_content = response.text
+
+        initial_msg = client.chat_postMessage(
+            channel=dm_channel_id,
+            text=f"🕵️‍♀️ Validation request received!\n• Using library: `{latest_file['name']}`\n• Validating schedules for: *{', '.join(selected_channels)}*."
+        )
+        thread_ts = initial_msg["ts"]
+
+        validation_success_list = [] # A list to track the outcome of each channel
+        threads = []
+        for channel_name in selected_channels:
+            config = CHANNEL_CONFIG[channel_name]
+            thread = threading.Thread(
+                target=validate_channel_and_report,
+                args=(config, selected_date, library_content, client, dm_channel_id, thread_ts, validation_success_list)
+            )
+            thread.start()
+            threads.append(thread)
+
+        for thread in threads:
+            thread.join()
+
+        # Post a final summary message
+        if all(validation_success_list):
+            final_summary = "✅ *Overall Result:* All selected schedules passed validation."
+        else:
+            final_summary = "🚫 *Overall Result:* One or more schedules failed validation. Please review the details above."
+        
+        client.chat_postMessage(
+            channel=dm_channel_id,
+            thread_ts=thread_ts,
+            text=final_summary
+        )
+
+    except Exception as e:
+        error_dm_channel_id = client.conversations_open(users=user_id)["channel"]["id"]
+        client.chat_postMessage(
+            channel=error_dm_channel_id,
+            text=f"Sorry, a critical error occurred during the validation process: `{e}`"
+        )
+
 @app.view("generate_schedule_modal")
 def handle_modal_submission(ack, body, client, view):
     """
