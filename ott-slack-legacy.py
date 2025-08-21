@@ -87,7 +87,7 @@ CHANNEL_CONFIG = {
         "house_code_pattern": r'(BOX\d+|EGH\d+|SLVR\d+|BOXFILL\d+|EGHFILL\d+|SLVRFILL\d+)',
         "bumper_pattern": r'(BOXBUMP\d+|EGHBUMP\d+|SLVRBUMP\d+)',
         "output_prefix": "SLVR",
-        "processing_logic": "slvr"
+        "processing_logic": "standard"
     },
     "SLVR SoCal": {
         "spreadsheet_id": '1Vi6vr5lI41SM9yV4y0HVeq0tMreJmhMp4s1coVKPTHw',
@@ -95,72 +95,88 @@ CHANNEL_CONFIG = {
         "house_code_pattern": r'(BOX\d+|EGH\d+|SLVR\d+|BOXFILL\d+|EGHFILL\d+|SLVRFILL\d+)',
         "bumper_pattern": r'(BOXBUMP\d+|EGHBUMP\d+|SLVRBUMP\d+)',
         "output_prefix": "SLVR_SOCAL",
-        "processing_logic": "slvr socal"
+        "processing_logic": "standard"
     },
 
 }
 
+# --- This is your existing logic, modified to work with Slack ---
 class ProcessingEngine:
-    def __init__(self, config, input_date_str, library_file_content):
+    def __init__(self, config, input_date_str, library_file_content, client, channel_id, thread_ts):
         self.config = config
         self.input_date_str = input_date_str
         self.library_file_content = library_file_content
-        self.logs = [] # A new list to store log messages
+        self.client = client
+        self.channel_id = channel_id
+        self.thread_ts = thread_ts
         self.unmatched_ids = []
         self.premature_mpls = []
 
-    # --- MODIFIED: The log() method now appends to the internal list ---
     def log(self, message):
-        """Adds a log message to an internal list instead of posting to Slack."""
-        self.logs.append(message)
+        """Sends a log message to the Slack thread."""
+        try:
+            self.client.chat_postMessage(
+                channel=self.channel_id,
+                thread_ts=self.thread_ts,
+                text=message
+            )
+        except Exception as e:
+            print(f"Error logging to Slack: {e}")
 
-    # --- REVISION 1: The run() method now RETURNS the DataFrame instead of uploading it. ---
     def run(self):
         try:
+            # Step 1: Date processing
             week_name, input_date = self._get_week_name_of_input_date(self.input_date_str)
-            if not week_name: return None
+            if not week_name: return
 
+            # Step 2: Download Google Sheet
             downloads_folder = str(Path.home() / "Downloads")
             temp_grid_file = os.path.join(downloads_folder, f"temp_grid_{self.config['output_prefix']}.csv")
-            if not self._download_sheet(self.config['spreadsheet_id'], week_name.upper(), temp_grid_file): return None
+            if not self._download_sheet(self.config['spreadsheet_id'], week_name.upper(), temp_grid_file): return
 
+            # Step 3: Process downloaded grid
             grid_data = self._prepare_grid_data(temp_grid_file, input_date)
             
+            # Step 4: Extract programming
             if self.config.get('processing_logic') == 'pll domestic':
                 programming_df = self._process_show_programming_pll_domestic(grid_data)
-            elif self.config.get('processing_logic') == 'slvr':
-                programming_df = self._process_show_programming_slvr(grid_data)
-            elif self.config.get('processing_logic') == 'slvr socal':
-                programming_df = self._process_show_programming_slvr_socal(grid_data)
             else:
                 programming_df = self._process_show_programming_standard(grid_data)
             
+            # Step 5: Load library sheet FROM MEMORY (passed from Slack upload)
             self.log("Getting OTTera node IDs...")
             library_df = self._filter_unique_rows_by_latest_date(self.library_file_content)
-            if library_df.empty: return None
+            if library_df.empty: return
 
+            # Step 6: Validate and generate final output
             final_df = self._create_final_sheet(programming_df, library_df)
 
-            # If the process failed, log it and return None
-            if final_df is None:
+            if final_df is not None:
+                # Step 7: UPLOAD the final output file to Slack
+                self.log("Success! Creating schedule sheet...")
+                output_filename = f"{self.config['output_prefix']}_Schedule_Sheet_{week_name.upper()}.csv"
+                
+                self.client.files_upload_v2(
+                    channel=self.channel_id,
+                    thread_ts=self.thread_ts,
+                    content=final_df.to_csv(index=False),
+                    filename=output_filename,
+                    initial_comment=f"Here it is!"
+                )
+            else:
                 self.log(f"--- {self.config['output_prefix']} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---")
-                self.log("🚫 *PROCESS HALTED* for this channel due to validation errors found above.")
-                return None
-            
-            # On success, return the created DataFrame
-            return final_df
+                self.log("🚫 *PROCESS HALTED* due to validation errors found above.")
 
         except Exception as e:
-            self.log(f"\n--- A CRITICAL ERROR OCCURRED for {self.config['output_prefix']} ---\n`{e}`")
+            self.log(f"\n--- A CRITICAL ERROR OCCURRED ---\n`{e}`")
             import traceback
             self.log(f"```\n{traceback.format_exc()}\n```")
-            return None # Ensure we return None on a critical error
         finally:
             if 'temp_grid_file' in locals() and os.path.exists(temp_grid_file):
                 os.remove(temp_grid_file)
-    
-    # --- The rest of your ProcessingEngine methods remain unchanged ---
+
     def _filter_unique_rows_by_latest_date(self, csv_content):
+        """Modified to read CSV content directly instead of a file path."""
         try:
             df = pd.read_csv(io.StringIO(csv_content))
             if 'legacy_id' not in df.columns or 'id' not in df.columns:
@@ -171,7 +187,8 @@ class ProcessingEngine:
         except Exception as e:
             self.log(f"ERROR: Failed to read or process library CSV content: {e}")
             return pd.DataFrame()
-        
+
+    # --- Paste all your other _methods from ProcessingEngine here, unchanged ---
     def _get_week_name_of_input_date(self, input_date_str):
         date_formats = ["%Y-%m-%d", "%m%d%Y", "%m/%d/%Y", "%m-%d-%Y", "%m%d%y", "%m/%d/%y", "%m-%d-%y"]
         input_date = None
@@ -181,23 +198,27 @@ class ProcessingEngine:
                 break
             except ValueError:
                 continue
+        
         if not input_date:
             self.log(f"ERROR: Invalid date format: {input_date_str}. Please use a valid format.")
             return None, None
+
         start_of_week = input_date - timedelta(days=input_date.weekday())
         end_of_week = start_of_week + timedelta(days=6)
         week_start_month = start_of_week.strftime("%b")
         week_end_month = end_of_week.strftime("%b")
         week_name = f"{week_start_month} {start_of_week.day}-{week_end_month} {end_of_week.day}"
         return week_name, start_of_week
-    
+
     def _download_sheet(self, spreadsheet_id, sheet_name, output_file):
+        # schedule for '{sheet_name}'...")
         url = f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/gviz/tq?tqx=out:csv&sheet={sheet_name}"
         try:
             response = requests.get(url, timeout=30)
             if response.status_code == 200:
                 with open(output_file, 'wb') as f:
                     f.write(response.content)
+                #self.log("Download successful.")
                 return True
             else:
                 self.log(f"ERROR: Could not get grid for '{sheet_name}'.")
@@ -207,15 +228,17 @@ class ProcessingEngine:
         except requests.exceptions.RequestException as e:
             self.log(f"ERROR: A network error occurred while downloading the sheet: {e}")
             return False
-        
+
     def _prepare_grid_data(self, file_path, start_date):
         full_grid_data = pd.read_csv(file_path)
         grid_data = full_grid_data.iloc[:50].copy()
         grid_data = grid_data.drop(grid_data.columns[[8]], axis=1, errors='ignore')
         grid_data = grid_data.drop(grid_data.index[:2]).reset_index(drop=True)
+        
         week_dates = [(start_date + timedelta(days=i)).strftime("%m/%d/%Y") for i in range(7)]
         week_dates.insert(0, 'Start Time')
         grid_data.columns = week_dates
+        
         grid_data['Start Time'] = pd.to_datetime(grid_data['Start Time'], errors='coerce').dt.strftime('%H:%M')
         grid_data = grid_data.fillna('')
         return grid_data
@@ -237,14 +260,13 @@ class ProcessingEngine:
             for index, row_data in day_data.items():
                 row_str = str(row_data).upper().strip()
                 
-                # --- THIS IS THE FIX ---
-                # The line that checked for "BROKEN GLASS" or "STUNT" and skipped the
-                # entire cell has been removed. The logic now correctly prioritizes
-                # finding a media list first.
-                # ----------------------
+                # Standard Rule: Check for Broken Glass unless explicitly ignored.
+                if 'BROKEN GLASS' in row_str or 'STUNT' in row_str:
+                    continue
 
                 main_matches = re.findall(house_code_pattern, row_str)
                 
+                # Standard Rule: Process Media Lists unless explicitly ignored.
                 media_list_matches = None
                 qt_media_list_matches = None
                 if not self.config.get('ignore_media_list_rule', False):
@@ -282,49 +304,93 @@ class ProcessingEngine:
         return pd.DataFrame(results)
     
     def _process_show_programming_pll_domestic(self, grid_data):
+        #self.log("-> Applying PLL Domestic parsing rules.")
+        
         results = []
         house_code_pattern = self.config['house_code_pattern']
         bumper_pattern = self.config.get('bumper_pattern')
         qt_media_list_pattern = r'QT\s+MEDIA\s?LIST[:\s]*?(\d+)'
 
-        broken_glass_pattern = re.compile(r'BROKEN\s?GLASS:?\s*(' + house_code_pattern + r')')
+        for col in grid_data.columns[1:8]:
+            day_data = grid_data[col]
+            prev_index, prev_house_code, prev_bumper_in, prev_bumper_out = None, '', '', ''
+
+            for index, row_data in day_data.items():
+                row_str = str(row_data).upper().strip()
+                
+                # Standard Rule: Check for Broken Glass unless explicitly ignored.
+                if 'STUNT' in row_str:
+                    continue
+
+                main_matches = re.findall(house_code_pattern, row_str)
+                
+                # Standard Rule: Process Media Lists unless explicitly ignored.
+                qt_media_list_matches = None
+                qt_media_list_matches = re.search(qt_media_list_pattern, row_str)
+                
+                current_house_code, bumper_in, bumper_out = None, '', ''
+
+                if qt_media_list_matches:
+                    current_house_code = f'MEDIALIST{qt_media_list_matches.group(1)}'
+                elif main_matches:
+                    current_house_code = '|ad_break|'.join(main_matches)
+                    if bumper_pattern:
+                        house_codes_found = list(re.finditer(house_code_pattern, row_str))
+                        bumpers_found = list(re.finditer(bumper_pattern, row_str))
+                        if house_codes_found and bumpers_found:
+                            first_pos = house_codes_found[0].start()
+                            bumper_in = '|ad_break|'.join([b.group(0) for b in bumpers_found if b.start() < first_pos])
+                            bumper_out = '|ad_break|'.join([b.group(0) for b in bumpers_found if b.start() > first_pos])
+
+                if current_house_code:
+                    if prev_house_code and prev_index is not None:
+                        duration = (index - prev_index) * 30
+                        start_time = grid_data.at[prev_index, 'Start Time']
+                        results.append({'House Code': prev_house_code, 'Bumper In': prev_bumper_in, 'Bumper Out': prev_bumper_out, 'Duration (minutes)': duration, 'Air Date': col, 'Start Time': start_time})
+                    prev_house_code, prev_bumper_in, prev_bumper_out, prev_index = current_house_code, bumper_in, bumper_out, index
+            
+            if prev_house_code and prev_index is not None:
+                duration = (len(day_data) - prev_index) * 30
+                start_time = grid_data.at[prev_index, 'Start Time']
+                results.append({'House Code': prev_house_code, 'Bumper In': prev_bumper_in, 'Bumper Out': prev_bumper_out, 'Duration (minutes)': duration, 'Air Date': col, 'Start Time': start_time})
+        return pd.DataFrame(results)
+    
+    def _process_show_programming_pll_domestic(self, grid_data):
+        #self.log("-> Applying PLL Domestic-specific parsing rules.")
+        
+        results = []
+        house_code_pattern = self.config['house_code_pattern']
+        bumper_pattern = self.config.get('bumper_pattern')
+        qt_media_list_pattern = r'QT\s+MEDIA\s?LIST[:\s]*?(\d+)'
 
         for col_name in grid_data.columns[1:8]:
             prev_index, prev_house_code, prev_bumpers_in, prev_bumpers_out = None, '', '', ''
 
             for index, row in grid_data.iterrows():
                 cell_content = str(row[col_name]).upper().strip()
+                
+                # Rule: Check for Broken Glass unless the config flag is True.
+                if 'STUNT' in cell_content:
+                    continue
+
                 is_new_block, current_house_code_str, current_bumpers_in_str, current_bumpers_out_str = False, '', '', ''
 
                 if cell_content:
-                    # --- THIS IS THE FIX ---
-                    # Replace newline characters with commas to handle multi-line cells.
-                    cell_content = cell_content.replace('\n', ',')
-                    # --- END OF FIX ---
-
+                    # Rule: Check for Media Lists unless the config flag is True.
+                    qt_matches = None
                     qt_matches = re.search(qt_media_list_pattern, cell_content)
+
                     parts = [p.strip() for p in cell_content.split(',') if p.strip()]
 
                     if qt_matches:
                         is_new_block = True
                         current_house_code_str = f'MEDIALIST{qt_matches.group(1)}'
-                    
-                    elif parts and any(
-                        broken_glass_pattern.match(p) or
-                        re.match(house_code_pattern, p) or
-                        (bumper_pattern and re.match(bumper_pattern, p))
-                        for p in parts
-                    ):
+                    elif parts and any(re.match(house_code_pattern, p) or (bumper_pattern and re.match(bumper_pattern, p)) for p in parts):
                         is_new_block = True
                         house_codes, bumpers_in, bumpers_out = [], [], []
                         found_main_content = False
                         for part in parts:
-                            bg_match = broken_glass_pattern.match(part)
-
-                            if bg_match:
-                                house_codes.append(bg_match.group(1))
-                                found_main_content = True
-                            elif re.match(house_code_pattern, part):
+                            if re.match(house_code_pattern, part):
                                 house_codes.append(part)
                                 found_main_content = True
                             elif bumper_pattern and re.match(bumper_pattern, part):
@@ -334,7 +400,7 @@ class ProcessingEngine:
                         current_bumpers_in_str = '|ad_break|'.join(bumpers_in)
                         current_bumpers_out_str = '|ad_break|'.join(bumpers_out)
 
-                if is_new_block and current_house_code_str:
+                if is_new_block:
                     if prev_index is not None:
                         duration = (index - prev_index) * 30
                         if duration > 0:
@@ -349,121 +415,6 @@ class ProcessingEngine:
                     start_time = grid_data.at[prev_index, 'Start Time']
                     results.append({'House Code': prev_house_code, 'Bumper In': prev_bumpers_in, 'Bumper Out': prev_bumpers_out, 'Duration (minutes)': duration, 'Air Date': col_name, 'Start Time': start_time})
         
-        return pd.DataFrame(results)
-    
-    def _process_show_programming_slvr(self, grid_data):
-        """
-        Processes the grid for SLVR. It uses standard logic but adds a special
-        rule to schedule 'BROKEN GLASS' only when 'SOCAL MEDIA LIST' is also present.
-        """
-        results = []
-        house_code_pattern = self.config['house_code_pattern']
-        bumper_pattern = self.config.get('bumper_pattern')
-        # Standard pattern for "MEDIA LIST" and "ML"
-        media_list_pattern = r'^MEDIA\s?LIST[:\s]*?(\d+)|[^\w\s][\s]*MEDIA\s?LIST[:\s]*?(\d+)|^ML[:\s]*?(\d+)|[^\w\s][\s]*ML[:\s]*?(\d+)'
-        # A simple pattern to check for the presence of a SoCal media list
-        socal_check_pattern = r'SOCAL\s+(MEDIA\s?LIST|ML)'
-
-        for col in grid_data.columns[1:8]:
-            day_data = grid_data[col]
-            prev_index, prev_house_code, prev_bumper_in, prev_bumper_out = None, '', '', ''
-
-            for index, row_data in day_data.items():
-                row_str = str(row_data).upper().strip()
-                current_house_code, bumper_in, bumper_out = None, '', ''
-
-                media_list_matches = re.search(media_list_pattern, row_str)
-                main_matches = re.findall(house_code_pattern, row_str)
-
-                # Highest priority: Check for the special SLVR rule
-                if re.search(socal_check_pattern, row_str) and 'BROKEN GLASS' in row_str:
-                    current_house_code = 'BROKEN GLASS'
-                # Next priority: Check for standard "MEDIA LIST" or "ML"
-                elif media_list_matches:
-                    media_list_id = next(g for g in media_list_matches.groups() if g is not None)
-                    current_house_code = f'MEDIALIST{media_list_id}'
-                # Fallback to regular house codes
-                elif main_matches:
-                    current_house_code = '|ad_break|'.join(main_matches)
-                    # Standard bumper logic
-                    if bumper_pattern:
-                        house_codes_found = list(re.finditer(house_code_pattern, row_str))
-                        bumpers_found = list(re.finditer(bumper_pattern, row_str))
-                        if house_codes_found and bumpers_found:
-                            first_pos = house_codes_found[0].start()
-                            bumper_in = '|ad_break|'.join([b.group(0) for b in bumpers_found if b.start() < first_pos])
-                            bumper_out = '|ad_break|'.join([b.group(0) for b in bumpers_found if b.start() > first_pos])
-
-                if current_house_code:
-                    if prev_house_code and prev_index is not None:
-                        duration = (index - prev_index) * 30
-                        start_time = grid_data.at[prev_index, 'Start Time']
-                        results.append({'House Code': prev_house_code, 'Bumper In': prev_bumper_in, 'Bumper Out': prev_bumper_out, 'Duration (minutes)': duration, 'Air Date': col, 'Start Time': start_time})
-                    prev_house_code, prev_bumper_in, prev_bumper_out, prev_index = current_house_code, bumper_in, bumper_out, index
-            
-            if prev_house_code and prev_index is not None:
-                duration = (len(day_data) - prev_index) * 30
-                start_time = grid_data.at[prev_index, 'Start Time']
-                results.append({'House Code': prev_house_code, 'Bumper In': prev_bumper_in, 'Bumper Out': prev_bumper_out, 'Duration (minutes)': duration, 'Air Date': col, 'Start Time': start_time})
-        return pd.DataFrame(results)
-
-    def _process_show_programming_slvr_socal(self, grid_data):
-        """
-        Processes the grid for SLVR SoCal. It uses standard logic but adds
-        recognition for 'SOCAL MEDIA LIST' and 'SOCAL ML'.
-        """
-        results = []
-        house_code_pattern = self.config['house_code_pattern']
-        bumper_pattern = self.config.get('bumper_pattern')
-        # Standard pattern for "MEDIA LIST" and "ML"
-        media_list_pattern = r'^MEDIA\s?LIST[:\s]*?(\d+)|[^\w\s][\s]*MEDIA\s?LIST[:\s]*?(\d+)|^ML[:\s]*?(\d+)|[^\w\s][\s]*ML[:\s]*?(\d+)'
-        # New pattern specifically for SoCal media lists
-        socal_media_list_pattern = r'SOCAL\s+MEDIA\s?LIST[:\s]*?(\d+)|SOCAL\s+ML[:\s]*?(\d+)'
-
-        for col in grid_data.columns[1:8]:
-            day_data = grid_data[col]
-            prev_index, prev_house_code, prev_bumper_in, prev_bumper_out = None, '', '', ''
-
-            for index, row_data in day_data.items():
-                row_str = str(row_data).upper().strip()
-                current_house_code, bumper_in, bumper_out = None, '', ''
-
-                # Check for all media list variations
-                socal_media_list_matches = re.search(socal_media_list_pattern, row_str)
-                media_list_matches = re.search(media_list_pattern, row_str)
-                main_matches = re.findall(house_code_pattern, row_str)
-
-                # Highest priority: SoCal Media Lists
-                if socal_media_list_matches:
-                    media_list_id = next(g for g in socal_media_list_matches.groups() if g is not None)
-                    current_house_code = f'MEDIALIST{media_list_id}'
-                # Next priority: Standard Media Lists
-                elif media_list_matches:
-                    media_list_id = next(g for g in media_list_matches.groups() if g is not None)
-                    current_house_code = f'MEDIALIST{media_list_id}'
-                # Fallback to regular house codes
-                elif main_matches:
-                    current_house_code = '|ad_break|'.join(main_matches)
-                    # Standard bumper logic
-                    if bumper_pattern:
-                        house_codes_found = list(re.finditer(house_code_pattern, row_str))
-                        bumpers_found = list(re.finditer(bumper_pattern, row_str))
-                        if house_codes_found and bumpers_found:
-                            first_pos = house_codes_found[0].start()
-                            bumper_in = '|ad_break|'.join([b.group(0) for b in bumpers_found if b.start() < first_pos])
-                            bumper_out = '|ad_break|'.join([b.group(0) for b in bumpers_found if b.start() > first_pos])
-                
-                if current_house_code:
-                    if prev_house_code and prev_index is not None:
-                        duration = (index - prev_index) * 30
-                        start_time = grid_data.at[prev_index, 'Start Time']
-                        results.append({'House Code': prev_house_code, 'Bumper In': prev_bumper_in, 'Bumper Out': prev_bumper_out, 'Duration (minutes)': duration, 'Air Date': col, 'Start Time': start_time})
-                    prev_house_code, prev_bumper_in, prev_bumper_out, prev_index = current_house_code, bumper_in, bumper_out, index
-            
-            if prev_house_code and prev_index is not None:
-                duration = (len(day_data) - prev_index) * 30
-                start_time = grid_data.at[prev_index, 'Start Time']
-                results.append({'House Code': prev_house_code, 'Bumper In': prev_bumper_in, 'Bumper Out': prev_bumper_out, 'Duration (minutes)': duration, 'Air Date': col, 'Start Time': start_time})
         return pd.DataFrame(results)
     
     def _map_to_ids(self, house_code_str, library_sheet_df):
@@ -486,16 +437,25 @@ class ProcessingEngine:
         if programming_df.empty:
             self.log("WARNING: No programming blocks were found in the grid. Halting process.")
             return None
+
         self.log("Running validations...")
         unfit_durations = self._validate_slot_durations(programming_df, library_df)
         zero_duration_content = self._check_zero_duration_content(programming_df, library_df)
+
         self.unmatched_ids = []
         self.premature_mpls = []
+
         mapped_ids = programming_df['House Code'].apply(lambda x: self._map_to_ids(x, library_df))
         mapped_bumpers_in = programming_df['Bumper In'].apply(lambda x: self._map_to_ids(x, library_df))
         mapped_bumpers_out = programming_df['Bumper Out'].apply(lambda x: self._map_to_ids(x, library_df))
+
+        # --- MODIFICATION START ---
+        # The 'has_errors' flag will now only be set for critical errors.
         has_critical_errors = False
+
         if unfit_durations:
+            # Duration mismatches are now treated as warnings and will be logged,
+            # but will NOT halt the process.
             self.log("\n--- WARNING: DURATION MISMATCHES FOUND ---")
             for unfit in unfit_durations:
                 content_duration_formatted = self._convert_seconds_to_hhmm(unfit['Content Duration (seconds)'])
@@ -506,20 +466,27 @@ class ProcessingEngine:
                     f"  > Content duration ({content_duration_formatted}) is outside the valid range for a {slot_duration_formatted} slot.\n"
                     f"  > The valid duration range for this slot is between {valid_range_start} and {valid_range_end}."
                 )
+
         if zero_duration_content:
             has_critical_errors = True
             self.log("\n--- CRITICAL ERROR: ZERO DURATION CONTENT DETECTED ---")
             for content in zero_duration_content: self.log(f"{content['House Code']} (ID: {content['Mapped IDs']}) needs reindexing.")
+        
         if self.unmatched_ids:
             has_critical_errors = True
             self.log("\n--- CRITICAL ERROR: UNMATCHED HOUSE CODES (Not in library) ---")
             self.log(', '.join(sorted(list(set(self.unmatched_ids)))))
+        
         if self.premature_mpls:
             self.log("\n--- MANUAL SCHEDULING MAY BE REQUIRED ---")
             self.log("The following MPLS codes were found. Please verify them in OTTera:")
             self.log(', '.join(sorted(list(set(self.premature_mpls)))))
+        
+        # The process will only halt if there are CRITICAL errors.
         if has_critical_errors:
              return None
+        # --- MODIFICATION END ---
+              
         self.log("All critical validations passed. Assembling final sheet...")
         output_df = pd.DataFrame()
         output_df['date'] = programming_df['Air Date']
@@ -529,9 +496,11 @@ class ProcessingEngine:
         output_df['bumpers_out'] = mapped_bumpers_out.apply(lambda x: str(x).split('.')[0])
         output_df['bumpers_out'] = output_df['bumpers_out'].str.replace('|ad_break', '', regex=False)
         output_df['content'] = mapped_ids.astype(str).apply(lambda x: str(x).split('.')[0])
+        
         output_df['randomize_content'] = 'FALSE'
         output_df['slot_duration'] = programming_df['Duration (minutes)']
         output_df['time_slot'] = programming_df['Start Time']
+        
         promo_in = self.config.get('hourly_promo_in')
         promo_out = self.config.get('hourly_promo_out')
         if promo_in and promo_out:
@@ -540,15 +509,19 @@ class ProcessingEngine:
             output_df['is_new_hour'] = output_df['hour'] != output_df['hour'].shift()
             output_df.loc[output_df['is_new_hour'], 'content'] = (promo_in + "|" + output_df.loc[output_df['is_new_hour'], 'content'].astype(str) + "|" + promo_out)
             output_df = output_df.drop(columns=['hour', 'is_new_hour'])
+
+
         output_df['content'] += '|ad_break'
+        
         final_columns = ['date', 'linear_channel', 'bumpers_in', 'bumpers_out', 'content', 'randomize_content', 'slot_duration', 'time_slot']
+        
         return output_df[final_columns]
-    
+
     def _convert_seconds_to_hhmm(self, seconds):
         if pd.isna(seconds): return "00:00"
         total_minutes = int(seconds) // 60
         return f"{total_minutes // 60:02}:{total_minutes % 60:02}"
-    
+
     def _is_valid_duration(self, slot_duration, content_duration_seconds):
         content_duration_hhmm = self._convert_seconds_to_hhmm(content_duration_seconds)
         valid_durations = {
@@ -573,14 +546,17 @@ class ProcessingEngine:
                 if slot_duration in valid_durations:
                     start_time, end_time = valid_durations[slot_duration]
                     if not (start_time <= content_duration_hhmm <= end_time) and row['duration'] != 0:
+                        # --- THIS IS THE MODIFIED PART ---
+                        # Add the valid range to the dictionary we return.
                         unfit.append({
                             'House Code': row['House Code'], 
                             'Slot Duration (minutes)': slot_duration, 
                             'Content Duration (seconds)': int(row['duration']), 
                             'Air Date': row['Air Date'], 
                             'Start Time': row['Start Time'],
-                            'Valid Range': (start_time, end_time)
+                            'Valid Range': (start_time, end_time) # <-- ADD THIS LINE
                         })
+                        # --- END OF MODIFICATION ---
         return unfit
     
     def _check_zero_duration_content(self, programming_df, library_df):
@@ -595,10 +571,67 @@ class ProcessingEngine:
 def handle_generation_command(ack, body, client):
     """This function is triggered when a user runs the slash command."""
     ack()
+    
     try:
+        # Open the modal for user input
         client.views_open(
             trigger_id=body["trigger_id"],
-            view={"type": "modal","callback_id": "generate_schedule_modal","title": {"type": "plain_text", "text": "Schedule Generator"},"submit": {"type": "plain_text", "text": "Generate"},"close": {"type": "plain_text", "text": "Cancel"},"blocks": [{"type": "context","elements": [{"type": "mrkdwn","text": "ⓘ *Important*: Please make sure you have uploaded your library CSV file to me *before* running this command."}]},{"type": "input","block_id": "channel_block","label": {"type": "plain_text", "text": "1. Select Channels"},"element": {"type": "checkboxes","action_id": "channel_checkboxes","options": [{"text": {"type": "plain_text", "text": name}, "value": name} for name in CHANNEL_CONFIG.keys()]}},{"type": "actions","elements": [{"type": "button","text": {"type": "plain_text","text": "Select All","emoji": True},"action_id": "select_all_channels_action"}]},{"type": "input","block_id": "date_block","label": {"type": "plain_text", "text": "2. Select Schedule Date"},"element": {"type": "datepicker","action_id": "date_select","initial_date": datetime.now().strftime('%Y-%m-%d'),"placeholder": {"type": "plain_text", "text": "Select a date"}}}]}
+            view={
+                "type": "modal",
+                "callback_id": "generate_schedule_modal",
+                "title": {"type": "plain_text", "text": "Schedule Generator"},
+                "submit": {"type": "plain_text", "text": "Generate"},
+                "close": {"type": "plain_text", "text": "Cancel"},
+                "blocks": [
+                    {
+                        "type": "context",
+                        "elements": [
+                            {
+                                "type": "mrkdwn",
+                                "text": "ⓘ *Important*: Please make sure you have uploaded your library CSV file to me *before* running this command."
+                            }
+                        ]
+                    },
+                    {
+                        "type": "input",
+                        "block_id": "channel_block",
+                        "label": {"type": "plain_text", "text": "1. Select Channels"},
+                        "element": {
+                            "type": "checkboxes",
+                            "action_id": "channel_checkboxes",
+                            "options": [
+                                {"text": {"type": "plain_text", "text": name}, "value": name}
+                                for name in CHANNEL_CONFIG.keys()
+                            ]
+                        }
+                    },
+                    {
+                        "type": "actions",
+                        "elements": [
+                            {
+                                "type": "button",
+                                "text": {
+                                    "type": "plain_text",
+                                    "text": "Select All",  # <-- Text changed here
+                                    "emoji": True
+                                },
+                                "action_id": "select_all_channels_action"
+                            }
+                        ]
+                    },
+                    {
+                        "type": "input",
+                        "block_id": "date_block",
+                        "label": {"type": "plain_text", "text": "2. Select Schedule Date"},
+                        "element": {
+                            "type": "datepicker",
+                            "action_id": "date_select",
+                            "initial_date": datetime.now().strftime('%Y-%m-%d'),
+                            "placeholder": {"type": "plain_text", "text": "Select a date"}
+                        }
+                    }
+                ]
+            }
         )
     except Exception as e:
         print(f"Error opening modal: {e}")
@@ -607,81 +640,81 @@ def handle_generation_command(ack, body, client):
 def handle_select_all_channels(ack, body, client):
     """Handles the 'Select All' button click in the modal."""
     ack()
+    
     view = body['view']
     view_id = view['id']
-    all_channel_options = [{"text": {"type": "plain_text", "text": name}, "value": name} for name in CHANNEL_CONFIG.keys()]
+    
+    # Define all possible channel options
+    all_channel_options = [
+        {"text": {"type": "plain_text", "text": name}, "value": name}
+        for name in CHANNEL_CONFIG.keys()
+    ]
+    
+    # Find the channel input block and set its options to all channels
     for block in view['blocks']:
         if block.get('block_id') == 'channel_block':
+            # This line now ALWAYS selects all options
             block['element']['initial_options'] = all_channel_options
             break
-    updated_view = {"type": "modal","callback_id": view["callback_id"],"title": view["title"],"submit": view["submit"],"close": view["close"],"blocks": view["blocks"]}
+            
+    # Reconstruct the view payload cleanly for the update call
+    updated_view = {
+        "type": "modal",
+        "callback_id": view["callback_id"],
+        "title": view["title"],
+        "submit": view["submit"],
+        "close": view["close"],
+        "blocks": view["blocks"]
+    }
+    
     try:
         client.views_update(view_id=view_id, view=updated_view)
     except Exception as e:
         print(f"Error updating view: {e}")
 
-# --- REVISION 2: New function to run in a thread. It processes and stores the result. ---
-def process_channel_and_store_result(config, date_str, library_content, client, channel_id, thread_ts, results_list):
-    """
-    Runs the processing for one channel, posts a single summary message with all logs,
-    and appends the resulting DataFrame to a shared list.
-    """
-    # The engine no longer takes Slack client details directly
-    engine = ProcessingEngine(config, date_str, library_content)
-    result_df = engine.run()  # This runs the processing and collects logs internally
 
-    # --- MODIFIED: This section now builds and posts a single summary message ---
-    final_status_message = ""
-    log_summary = "\n".join(engine.logs) # Combine all collected logs
+def run_processing_in_thread(config, date_str, library_content, client, channel_id, thread_ts):
+    """Wrapper to run the engine in a separate thread."""
+    engine = ProcessingEngine(config, date_str, library_content, client, channel_id, thread_ts)
+    engine.run()
 
-    if result_df is not None and not result_df.empty:
-        results_list.append(result_df)
-        final_status_message = (
-            f"✅ *{config['output_prefix']}* - Success\n"
-            f"```{log_summary}```"
-        )
-    else:
-        final_status_message = (
-            f"⚠️ *{config['output_prefix']}* - Failed\n"
-            f"```{log_summary}```"
-        )
-    
-    client.chat_postMessage(
-        channel=channel_id,
-        thread_ts=thread_ts,
-        text=final_status_message
-    )
-
-# --- REVISION 3: The modal submission handler is heavily modified to manage threads and combine results. ---
+# --- REVISION 3: MODIFIED MODAL SUBMISSION TO HANDLE MULTIPLE CHANNELS ---
 @app.view("generate_schedule_modal")
 def handle_modal_submission(ack, body, client, view):
-    """
-    Handles modal submission, runs processing for each channel,
-    and combines the results into a single CSV file with a dynamic name.
-    """
+    """This function handles the submission of the modal."""
+    
     user_id = body["user"]["id"]
     values = view["state"]["values"]
+    
+    # Get the list of selected channels from the checkboxes
     selected_options = values["channel_block"]["channel_checkboxes"]["selected_options"]
     selected_channels = [opt["value"] for opt in selected_options]
     selected_date = values["date_block"]["date_select"]["selected_date"]
 
+    # If no channels were selected, acknowledge with an error message in the modal
     if not selected_channels:
         ack(response_action="errors", errors={"channel_block": "Please select at least one channel."})
         return
+
+    # Acknowledge the modal submission immediately so the UI doesn't hang
     ack()
     
     try:
+        # Open a DM with the user to send updates
         dm_channel_response = client.conversations_open(users=user_id)
         dm_channel_id = dm_channel_response["channel"]["id"]
 
-        # --- MODIFIED: Consolidate the startup logic before sending the first message ---
-        # First, find and download the library file content silently.
+        # Find and download the library CSV content *once* before the loop
+        client.chat_postMessage(channel=dm_channel_id, text="Searching for your most recent library CSV file...")
         files_response = client.files_list(user=user_id, filetype="csv", count=1)
+        
         if not files_response["files"]:
             client.chat_postMessage(channel=dm_channel_id, text="❌ Error: I couldn't find any CSV files you've uploaded. Please upload the library CSV and try again.")
             return
-        
+            
         latest_file = files_response["files"][0]
+        client.chat_postMessage(channel=dm_channel_id, text=f"Found library sheet: `{latest_file['name']}`. Downloading content...")
+
         response = requests.get(
             latest_file["url_private_download"],
             headers={"Authorization": f"Bearer {os.environ['SLACK_BOT_TOKEN']}"}
@@ -689,65 +722,39 @@ def handle_modal_submission(ack, body, client, view):
         response.raise_for_status()
         library_content = response.text
 
-        # Now, post a single, consolidated startup message.
-        initial_msg = client.chat_postMessage(
+        # Post a confirmation and then loop through each selected channel
+        channels_str = ', '.join([f'*{c}*' for c in selected_channels])
+        client.chat_postMessage(
             channel=dm_channel_id,
-            text=f"🚀 Request received!\n• Using library: `{latest_file['name']}`\n• Generating a combined schedule for *{', '.join(selected_channels)}* for the week of *{selected_date}*."        )
-        thread_ts = initial_msg["ts"]
-        # --- End of Modification ---
-
-        # Create and start a thread for each channel.
-        results_dataframes = []
-        threads = []
-        for channel_name in selected_channels:
-            config = CHANNEL_CONFIG[channel_name]
-            thread = threading.Thread(
-                target=process_channel_and_store_result,
-                # Note: We now pass the Slack client details here for the summary message
-                args=(config, selected_date, library_content, client, dm_channel_id, thread_ts, results_dataframes)
-            )
-            thread.start()
-            threads.append(thread)
-
-        # Wait for all threads to complete their work.
-        for thread in threads:
-            thread.join()
-
-        # Check if any results were successful, then combine and upload.
-        if not results_dataframes:
-            client.chat_postMessage(
-                channel=dm_channel_id,
-                thread_ts=thread_ts,
-                text="_All channels failed to process. No combined schedule sheet was created._"
-            )
-            return
-
-        client.chat_postMessage(channel=dm_channel_id, thread_ts=thread_ts, text="Combining all successful schedules...")
-        
-        master_df = pd.concat(results_dataframes, ignore_index=True)
-        # This is the new sorting logic
-        master_df.sort_values(by=['linear_channel', 'date', 'time_slot'], inplace=True)
-        
-        prefixes = sorted([CHANNEL_CONFIG[ch]['output_prefix'] for ch in selected_channels])
-        filename_prefix = "_".join(prefixes)
-        output_filename = f"{filename_prefix}_Schedule_Sheet_{selected_date}.csv"
-        
-        client.files_upload_v2(
-            channel=dm_channel_id,
-            thread_ts=thread_ts,
-            content=master_df.to_csv(index=False),
-            filename=output_filename,
-            initial_comment="🎉 Here is your combined schedule!"
+            text=f"✅ Request received! Generating schedules for {channels_str}. You will see progress in separate threads below."
         )
 
+        for channel_name in selected_channels:
+            # Post a new message for each channel to create a unique thread
+            initial_msg = client.chat_postMessage(
+                channel=dm_channel_id,
+                text=f"🚀 Starting process for *{channel_name}* for date *{selected_date}*..."
+            )
+            thread_ts = initial_msg["ts"]
+
+            # Start the long-running process in a background thread for this channel
+            config = CHANNEL_CONFIG[channel_name]
+            thread = threading.Thread(
+                target=run_processing_in_thread,
+                args=(config, selected_date, library_content, client, dm_channel_id, thread_ts)
+            )
+            thread.start()
+
     except Exception as e:
+        # Post errors to the user's DM
         error_dm_channel_id = client.conversations_open(users=user_id)["channel"]["id"]
         client.chat_postMessage(
             channel=error_dm_channel_id,
-            text=f"Sorry, a critical error occurred during the main process: `{e}`"
+            text=f"Sorry, a critical error occurred during setup: `{e}`"
         )
 
 
 if __name__ == "__main__":
     print("🤖 Slack bot is running...")
+    # Use SocketModeHandler for easy local development
     SocketModeHandler(app, os.environ["SLACK_APP_TOKEN"]).start()

@@ -286,69 +286,45 @@ class ProcessingEngine:
         house_code_pattern = self.config['house_code_pattern']
         bumper_pattern = self.config.get('bumper_pattern')
         qt_media_list_pattern = r'QT\s+MEDIA\s?LIST[:\s]*?(\d+)'
-
-        broken_glass_pattern = re.compile(r'BROKEN\s?GLASS:?\s*(' + house_code_pattern + r')')
-
         for col_name in grid_data.columns[1:8]:
             prev_index, prev_house_code, prev_bumpers_in, prev_bumpers_out = None, '', '', ''
-
             for index, row in grid_data.iterrows():
                 cell_content = str(row[col_name]).upper().strip()
+                if 'STUNT' in cell_content:
+                    continue
                 is_new_block, current_house_code_str, current_bumpers_in_str, current_bumpers_out_str = False, '', '', ''
-
                 if cell_content:
-                    # --- THIS IS THE FIX ---
-                    # Replace newline characters with commas to handle multi-line cells.
-                    cell_content = cell_content.replace('\n', ',')
-                    # --- END OF FIX ---
-
+                    qt_matches = None
                     qt_matches = re.search(qt_media_list_pattern, cell_content)
                     parts = [p.strip() for p in cell_content.split(',') if p.strip()]
-
                     if qt_matches:
                         is_new_block = True
                         current_house_code_str = f'MEDIALIST{qt_matches.group(1)}'
-                    
-                    elif parts and any(
-                        broken_glass_pattern.match(p) or
-                        re.match(house_code_pattern, p) or
-                        (bumper_pattern and re.match(bumper_pattern, p))
-                        for p in parts
-                    ):
+                    elif parts and any(re.match(house_code_pattern, p) or (bumper_pattern and re.match(bumper_pattern, p)) for p in parts):
                         is_new_block = True
                         house_codes, bumpers_in, bumpers_out = [], [], []
                         found_main_content = False
                         for part in parts:
-                            bg_match = broken_glass_pattern.match(part)
-
-                            if bg_match:
-                                house_codes.append(bg_match.group(1))
-                                found_main_content = True
-                            elif re.match(house_code_pattern, part):
+                            if re.match(house_code_pattern, part):
                                 house_codes.append(part)
                                 found_main_content = True
                             elif bumper_pattern and re.match(bumper_pattern, part):
                                 (bumpers_out if found_main_content else bumpers_in).append(part)
-                        
                         current_house_code_str = '|ad_break|'.join(house_codes)
                         current_bumpers_in_str = '|ad_break|'.join(bumpers_in)
                         current_bumpers_out_str = '|ad_break|'.join(bumpers_out)
-
-                if is_new_block and current_house_code_str:
+                if is_new_block:
                     if prev_index is not None:
                         duration = (index - prev_index) * 30
                         if duration > 0:
                             start_time = grid_data.at[prev_index, 'Start Time']
                             results.append({'House Code': prev_house_code, 'Bumper In': prev_bumpers_in, 'Bumper Out': prev_bumpers_out, 'Duration (minutes)': duration, 'Air Date': col_name, 'Start Time': start_time})
-                    
                     prev_index, prev_house_code, prev_bumpers_in, prev_bumpers_out = index, current_house_code_str, current_bumpers_in_str, current_bumpers_out_str
-            
             if prev_index is not None:
                 duration = (len(grid_data) - prev_index) * 30
                 if duration > 0:
                     start_time = grid_data.at[prev_index, 'Start Time']
                     results.append({'House Code': prev_house_code, 'Bumper In': prev_bumpers_in, 'Bumper Out': prev_bumpers_out, 'Duration (minutes)': duration, 'Air Date': col_name, 'Start Time': start_time})
-        
         return pd.DataFrame(results)
     
     def _process_show_programming_slvr(self, grid_data):
@@ -725,10 +701,9 @@ def handle_modal_submission(ack, body, client, view):
         client.chat_postMessage(channel=dm_channel_id, thread_ts=thread_ts, text="Combining all successful schedules...")
         
         master_df = pd.concat(results_dataframes, ignore_index=True)
-        # This is the new sorting logic
-        master_df.sort_values(by=['linear_channel', 'date', 'time_slot'], inplace=True)
+        master_df.sort_values(by=['date', 'time_slot'], inplace=True)
         
-        prefixes = sorted([CHANNEL_CONFIG[ch]['output_prefix'] for ch in selected_channels])
+        prefixes = sorted([CHANNEL_CONFIG[ch]['output_prefix'].lower() for ch in selected_channels])
         filename_prefix = "_".join(prefixes)
         output_filename = f"{filename_prefix}_Schedule_Sheet_{selected_date}.csv"
         
@@ -746,7 +721,6 @@ def handle_modal_submission(ack, body, client, view):
             channel=error_dm_channel_id,
             text=f"Sorry, a critical error occurred during the main process: `{e}`"
         )
-
 
 if __name__ == "__main__":
     print("🤖 Slack bot is running...")
