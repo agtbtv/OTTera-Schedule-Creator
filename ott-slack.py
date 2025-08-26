@@ -272,6 +272,68 @@ class ProcessingEngine:
         
         return has_critical_errors
     
+    def _run_validations(self, programming_df, library_df):
+        """
+        A dedicated method to run all checks and log the results with unique lists
+        for relevant errors.
+        """
+        self.log("Running validations...")
+        # Call the helper methods you provided to get the raw error lists
+        unfit_durations = self._validate_slot_durations(programming_df, library_df)
+        zero_duration_content = self._check_zero_duration_content(programming_df, library_df)
+
+        # We must call _map_to_ids to populate self.unmatched_ids
+        self.unmatched_ids = []
+        # Gather all unique house codes from the schedule to check them at once
+        all_house_codes = pd.unique(programming_df[['House Code', 'Bumper In', 'Bumper Out']].values.ravel('K'))
+        all_house_codes_str = '|ad_break|'.join(filter(None, all_house_codes))
+        self._map_to_ids(all_house_codes_str, library_df)
+
+        has_critical_errors = False
+
+        # For duration mismatches, each instance is reported with its unique date/time context.
+        if unfit_durations:
+            self.log("\n--- WARNING: DURATION MISMATCHES FOUND ---")
+            for unfit in unfit_durations:
+                content_duration_formatted = self._convert_seconds_to_hhmm(unfit['Content Duration (seconds)'])
+                slot_duration_formatted = self._convert_seconds_to_hhmm(unfit['Slot Duration (minutes)'] * 60)
+                valid_range_start, valid_range_end = unfit['Valid Range']
+                self.log(
+                    f"{unfit['House Code']} on {unfit['Air Date']} at {unfit['Start Time']}:\n"
+                    f"  > Content duration ({content_duration_formatted}) is outside the valid range for a {slot_duration_formatted} slot.\n"
+                    f"  > The valid duration range for this slot is between {valid_range_start} and {valid_range_end}."
+                )
+
+        # --- REVISED: This section now reports a unique list of zero-duration codes ---
+        if zero_duration_content:
+            has_critical_errors = True
+            self.log("\n--- CRITICAL ERROR: ZERO DURATION CONTENT DETECTED ---")
+            # Use a dictionary to store unique house codes and an example mapped ID.
+            # This automatically handles duplicates.
+            unique_zero_duration = {
+                content['House Code']: content['Mapped IDs'] 
+                for content in zero_duration_content
+            }
+            # Format the unique codes into a single, clean string for the log.
+            error_list = sorted([f"{code} (ID: {uid})" for code, uid in unique_zero_duration.items()])
+            self.log("The following house codes need reindexing: \n" + '\n'.join(error_list))
+        
+        # Reports a unique list of any house codes that were not found in the library.
+        if self.unmatched_ids:
+            has_critical_errors = True
+            self.log("\n--- CRITICAL ERROR: UNMATCHED HOUSE CODES (Not in library) ---")
+            # The 'set' automatically removes all duplicates from the list.
+            unique_unmatched = sorted(list(set(self.unmatched_ids)))
+            self.log("The following house codes were not found: \n" + '\n'.join(unique_unmatched))
+        
+        # Reports a unique list of MPLS codes, if any were found.
+        if self.premature_mpls:
+            self.log("\n--- MANUAL SCHEDULING MAY BE REQUIRED ---")
+            unique_mpls = sorted(list(set(self.premature_mpls)))
+            self.log("The following MPLS codes were found and should be verified: \n" + '\n'.join(unique_mpls))
+        
+        return has_critical_errors
+    
     def validate_only(self):
         """
         Runs the entire process up to the validation step and reports the results
