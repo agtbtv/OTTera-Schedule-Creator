@@ -512,11 +512,12 @@ class ProcessingEngine:
         
         return pd.DataFrame(results)
     
+    """
     def _process_show_programming_slvr(self, grid_data):
-        """
+        
         Processes the grid for SLVR. It uses standard logic but adds a special
         rule to schedule 'BROKEN GLASS' only when 'SOCAL MEDIA LIST' is also present.
-        """
+        
         results = []
         house_code_pattern = self.config['house_code_pattern']
         bumper_pattern = self.config.get('bumper_pattern')
@@ -566,6 +567,81 @@ class ProcessingEngine:
                 duration = (len(day_data) - prev_index) * 30
                 start_time = grid_data.at[prev_index, 'Start Time']
                 results.append({'House Code': prev_house_code, 'Bumper In': prev_bumper_in, 'Bumper Out': prev_bumper_out, 'Duration (minutes)': duration, 'Air Date': col, 'Start Time': start_time})
+        return pd.DataFrame(results)
+    """
+    
+    def _process_show_programming_slvr(self, grid_data):
+        """
+        Processes the grid for SLVR. It uses standard logic but adds a special
+        rule to schedule 'BROKEN GLASS' only when 'SOCAL MEDIA LIST' is also present.
+        """
+        results = []
+        house_code_pattern = self.config['house_code_pattern']
+        bumper_pattern = self.config.get('bumper_pattern')
+
+        # Standard pattern for "MEDIA LIST" and "ML"
+        media_list_pattern = r'^MEDIA\s?LIST[:\s]*?(\d+)|[^\w\s][\s]*MEDIA\s?LIST[:\s]*?(\d+)|^ML[:\s]*?(\d+)|[^\w\s][\s]*ML[:\s]*?(\d+)'
+        # A simple pattern to check for the presence of a SoCal media list
+        socal_check_pattern = r'SOCAL\s+(MEDIA\s?LIST|ML)'
+        # Pattern for BROKEN GLASS followed by a house code (same as domestic logic)
+        broken_glass_pattern = re.compile(r'BROKEN\s?GLASS:?\s*(' + house_code_pattern + r')')
+
+        for col in grid_data.columns[1:8]:
+            day_data = grid_data[col]
+            prev_index, prev_house_code, prev_bumper_in, prev_bumper_out = None, '', '', ''
+
+            for index, row_data in day_data.items():
+                row_str = str(row_data).upper().strip()
+                current_house_code, bumper_in, bumper_out = None, '', ''
+
+                media_list_matches = re.search(media_list_pattern, row_str)
+                main_matches = re.findall(house_code_pattern, row_str)
+                bg_match = broken_glass_pattern.search(row_str)
+
+                # Highest priority: Special SLVR rule (SoCal + Broken Glass)
+                if re.search(socal_check_pattern, row_str) and bg_match:
+                    current_house_code = bg_match.group(1)  # capture the actual house code after BROKEN GLASS
+                # Next priority: Check for standard "MEDIA LIST" or "ML"
+                elif media_list_matches:
+                    media_list_id = next(g for g in media_list_matches.groups() if g is not None)
+                    current_house_code = f'MEDIALIST{media_list_id}'
+                # Fallback: Regular house codes
+                elif main_matches:
+                    current_house_code = '|ad_break|'.join(main_matches)
+                    # Standard bumper logic
+                    if bumper_pattern:
+                        house_codes_found = list(re.finditer(house_code_pattern, row_str))
+                        bumpers_found = list(re.finditer(bumper_pattern, row_str))
+                        if house_codes_found and bumpers_found:
+                            first_pos = house_codes_found[0].start()
+                            bumper_in = '|ad_break|'.join([b.group(0) for b in bumpers_found if b.start() < first_pos])
+                            bumper_out = '|ad_break|'.join([b.group(0) for b in bumpers_found if b.start() > first_pos])
+
+                if current_house_code:
+                    if prev_house_code and prev_index is not None:
+                        duration = (index - prev_index) * 30
+                        start_time = grid_data.at[prev_index, 'Start Time']
+                        results.append({
+                            'House Code': prev_house_code,
+                            'Bumper In': prev_bumper_in,
+                            'Bumper Out': prev_bumper_out,
+                            'Duration (minutes)': duration,
+                            'Air Date': col,
+                            'Start Time': start_time
+                        })
+                    prev_house_code, prev_bumper_in, prev_bumper_out, prev_index = current_house_code, bumper_in, bumper_out, index
+
+            if prev_house_code and prev_index is not None:
+                duration = (len(day_data) - prev_index) * 30
+                start_time = grid_data.at[prev_index, 'Start Time']
+                results.append({
+                    'House Code': prev_house_code,
+                    'Bumper In': prev_bumper_in,
+                    'Bumper Out': prev_bumper_out,
+                    'Duration (minutes)': duration,
+                    'Air Date': col,
+                    'Start Time': start_time
+                })
         return pd.DataFrame(results)
 
     def _process_show_programming_slvr_socal(self, grid_data):
