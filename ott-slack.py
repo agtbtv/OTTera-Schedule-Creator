@@ -45,14 +45,14 @@ CHANNEL_CONFIG = {
         "output_prefix": "BilliardTV",
         "processing_logic": "standard"
     },
-    #"Bowling": {
-    #    "spreadsheet_id": '1yj4FjX1uv3irJbftSGTP-xCdZhtovoP1f3RCdRk-cek',
-    #    "linear_channel_id": 0,
-    #    "house_code_pattern": r'(BOWL\d+|BOWLFILL\d+)',
-    #    "bumper_pattern": r'(BOWLBUMP\d+)',
-    #    "output_prefix": "BowlingTV",
-    #    "processing_logic": "standard"
-    #},
+    "Bowling": {
+        "spreadsheet_id": '1yj4FjX1uv3irJbftSGTP-xCdZhtovoP1f3RCdRk-cek',
+        "linear_channel_id": 0,
+        "house_code_pattern": r'(BOWL\d+|BOWLFILL\d+)',
+        "bumper_pattern": r'(BOWLBUMP\d+)',
+        "output_prefix": "BowlingTV",
+        "processing_logic": "standard"
+    },
     "Boxing": {
         "spreadsheet_id": '1jdMKwExqP3g0KpmCTrbOdxS74eAHLaeIsZPb-00NgT0',
         "linear_channel_id": 2797,
@@ -448,7 +448,7 @@ class ProcessingEngine:
         bumper_pattern = self.config.get('bumper_pattern')
         qt_media_list_pattern = r'QT\s+MEDIA\s?LIST[:\s]*?(\d+)'
 
-        broken_glass_pattern = re.compile(r'BROKEN\s?GLASS:?\s*(' + house_code_pattern + r')')
+        broken_glass_pattern = re.compile(r'(?:BROKEN\s?GLASS|B\s?G):?\s*(' + house_code_pattern + r')')
 
         for col_name in grid_data.columns[1:8]:
             prev_index, prev_house_code, prev_bumpers_in, prev_bumpers_out = None, '', '', ''
