@@ -47,7 +47,7 @@ CHANNEL_CONFIG = {
     },
     "Bowling": {
         "spreadsheet_id": '1yj4FjX1uv3irJbftSGTP-xCdZhtovoP1f3RCdRk-cek',
-        "linear_channel_id": 0,
+        "linear_channel_id": 7487,
         "house_code_pattern": r'(BOWL\d+|BOWLFILL\d+)',
         "bumper_pattern": r'(BOWLBUMP\d+)',
         "output_prefix": "BowlingTV",
