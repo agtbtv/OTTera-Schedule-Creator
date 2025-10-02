@@ -53,6 +53,7 @@ CHANNEL_CONFIG = {
         "output_prefix": "BowlingTV",
         "processing_logic": "standard"
     },
+    """ RIP BOXING
     "Boxing": {
         "spreadsheet_id": '1jdMKwExqP3g0KpmCTrbOdxS74eAHLaeIsZPb-00NgT0',
         "linear_channel_id": 2797,
@@ -61,6 +62,7 @@ CHANNEL_CONFIG = {
         "output_prefix": "BoxingTV",
         "processing_logic": "standard"
     },
+    """
     "PLL Domestic": {
         "spreadsheet_id": '1qLC9nSmQHB7pd8lIEe6NXyQzs_49mSnWv53I4cq6EcQ',
         "linear_channel_id": 9,
