@@ -53,16 +53,15 @@ CHANNEL_CONFIG = {
         "output_prefix": "BowlingTV",
         "processing_logic": "standard"
     },
-    """ RIP BOXING
-    "Boxing": {
-        "spreadsheet_id": '1jdMKwExqP3g0KpmCTrbOdxS74eAHLaeIsZPb-00NgT0',
-        "linear_channel_id": 2797,
-        "house_code_pattern": r'(BOX\d+|BOXFILL\d+)',
-        "bumper_pattern": r'(BOXBUMP\d+)',
-        "output_prefix": "BoxingTV",
-        "processing_logic": "standard"
-    },
-    """
+    #RIP BOXING
+    #"Boxing": {
+    #    "spreadsheet_id": '1jdMKwExqP3g0KpmCTrbOdxS74eAHLaeIsZPb-00NgT0',
+    #    "linear_channel_id": 2797,
+    #    "house_code_pattern": r'(BOX\d+|BOXFILL\d+)',
+    #    "bumper_pattern": r'(BOXBUMP\d+)',
+    #    "output_prefix": "BoxingTV",
+    #    "processing_logic": "standard"
+    #},
     "PLL Domestic": {
         "spreadsheet_id": '1qLC9nSmQHB7pd8lIEe6NXyQzs_49mSnWv53I4cq6EcQ',
         "linear_channel_id": 9,
@@ -221,7 +220,10 @@ class ProcessingEngine:
     def _prepare_grid_data(self, file_path, start_date):
         full_grid_data = pd.read_csv(file_path)
         grid_data = full_grid_data.iloc[:50].copy()
-        grid_data = grid_data.drop(grid_data.columns[[8]], axis=1, errors='ignore')
+        if grid_data.shape[1] > 8:
+            print("Warning: Found more than 8 columns in grid data. Truncating to the first 8.")
+            grid_data = grid_data.iloc[:, :8]
+        #grid_data = grid_data.drop(grid_data.columns[[8]], axis=1, errors='ignore')
         grid_data = grid_data.drop(grid_data.index[:2]).reset_index(drop=True)
         week_dates = [(start_date + timedelta(days=i)).strftime("%m/%d/%Y") for i in range(7)]
         week_dates.insert(0, 'Start Time')
