@@ -93,7 +93,7 @@ CHANNEL_CONFIG = {
     "SLVR": {
         "spreadsheet_id": '1Vi6vr5lI41SM9yV4y0HVeq0tMreJmhMp4s1coVKPTHw',
         "linear_channel_id": 7260,
-        "house_code_pattern": r'(EGH\d+|SLVR\d+|EGHFILL\d+|SLVRFILL\d+|SBAW\d+|CCA\d+|SGIHL\d+|SNHLR\d+|SNHLP\d+|FBLJK\d+|SETH\d+|SLACH\d+|SSWING\d+|SKSIX\d+|SGOAT\d+|SROYAL\d+)',
+        "house_code_pattern": r'(EGH\d+|SLVR\d+|EGHFILL\d+|SLVRFILL\d+|SBAW\d+|CCA\d+|SGIHL\d+|SNHLR\d+|SNHLP\d+|FBLJK\d+|SETH\d+|SLACH\d+|SSWING\d+|SKSIX\d+|SGOAT\d+|SROYAL\d+|SATKM\d+)',
         "bumper_pattern": r'(EGHBUMP\d+|SLVRBUMP\d+)',
         "output_prefix": "SLVR",
         "processing_logic": "slvr"
@@ -101,7 +101,7 @@ CHANNEL_CONFIG = {
     "SLVR SoCal": {
         "spreadsheet_id": '1Vi6vr5lI41SM9yV4y0HVeq0tMreJmhMp4s1coVKPTHw',
         "linear_channel_id": 7790,
-        "house_code_pattern": r'(EGH\d+|SLVR\d+|EGHFILL\d+|SLVRFILL\d+|SBAW\d+|CCA\d+|SGIHL\d+|SNHLR\d+|SNHLP\d+|FBLJK\d+|SETH\d+|SLACH\d+|SSWING\d+|SKSIX\d+|SGOAT\d+|SROYAL\d+)',
+        "house_code_pattern": r'(EGH\d+|SLVR\d+|EGHFILL\d+|SLVRFILL\d+|SBAW\d+|CCA\d+|SGIHL\d+|SNHLR\d+|SNHLP\d+|FBLJK\d+|SETH\d+|SLACH\d+|SSWING\d+|SKSIX\d+|SGOAT\d+|SROYAL\d+|SATKM\d+)',
         "bumper_pattern": r'(EGHBUMP\d+|SLVRBUMP\d+)',
         "output_prefix": "SLVR_SOCAL",
         "processing_logic": "slvr socal"
